@@ -4,7 +4,6 @@ import math, re, json
 
 # Design choices of ours (not facts from any message)
 OPEN, LUNCH, CLOSE, STEP = 15, 30, 15, 5          # minutes
-PREFERRED = ("standard", "regular")                # default meal tier if offered
 NUMERIC = ("students", "staff", "team_size", "teams", "hours", "budget_total", "prayer_break_min",
            "meals_ordered", "judges_confirmed", "judge_fee", "judge_min_per_team",
            "judge_max_teams", "judges_per_team", "judge_late_min")
@@ -27,7 +26,6 @@ STOP = {"bill", "bills", "cost", "costs", "fee", "fees", "payment", "payments", 
 
 
 def toks(s):
-    """Content words of an item name, so 'printing bill' and 'printing' count as the same item."""
     return {w[:-1] if len(w) > 3 and w.endswith("s") else w
             for w in re.findall(r"[a-z0-9]+", str(s).lower()) if w not in STOP}
 
@@ -70,7 +68,7 @@ def fold(records):
                 if not isinstance(it, dict) or not it.get(idk):
                     continue
                 name = str(it[idk]).strip().lower()
-                if k in ("spent", "requests"):          # same expense under a slightly different name
+                if k in ("spent", "requests"):
                     for old in F[k]:
                         if toks(name) & toks(old):
                             name = old
@@ -91,7 +89,9 @@ def fold(records):
     return F, win, contrib
 
 
-def make_schedule(D, prayer, needed, teams, per, mins, late, bl):
+def make_schedule(D, prayer, needed, teams, per, mins, late, bl, mx):
+    """Build a schedule. Handles judges_per_team > 1 without double-booking any team.
+    Returns None if no arrangement fits inside D and the blackout windows."""
     rounds = math.ceil(teams * per / needed)
     jlen = late + rounds * mins
     hack = D - OPEN - prayer - LUNCH - CLOSE - jlen
@@ -106,10 +106,40 @@ def make_schedule(D, prayer, needed, teams, per, mins, late, bl):
                 segs.append({"label": label, "start": t, "end": t + ln})
                 t += ln
         js = next(s["start"] for s in segs if s["label"] == "Judging")
-        slots = [{"judge": k % needed + 1, "team": k // per + 1,
-                  "start": js + late + (k // needed) * mins,
-                  "end": js + late + (k // needed + 1) * mins} for k in range(teams * per)]
-        if not any(s["start"] < b and s["end"] > a for s in slots for a, b in bl):
+        # Each team gets `per` slots, each in a different round, each with a different judge.
+        slots = []
+        team_slots = {tt: 0 for tt in range(1, teams + 1)}
+        r = 0
+        while sum(team_slots.values()) < teams * per:
+            if r > mx:
+                return None                     # would exceed max teams per judge
+            round_teams = set()
+            assigned = 0
+            for j in range(1, needed + 1):
+                cands = [tt for tt in range(1, teams + 1)
+                         if team_slots[tt] < per and tt not in round_teams]
+                if not cands:
+                    break
+                tt = min(cands, key=lambda x: (team_slots[x], x))
+                round_teams.add(tt)
+                team_slots[tt] += 1
+                slots.append({"judge": j, "team": tt,
+                              "start": js + late + r * mins,
+                              "end": js + late + (r + 1) * mins})
+                assigned += 1
+            if assigned == 0:
+                return None
+            r += 1
+        # Every segment (not just judging) must stay out of every blackout window.
+        bad = False
+        for s in segs:
+            for a, b in bl:
+                if s["start"] < b and s["end"] > a:
+                    bad = True
+                    break
+            if bad:
+                break
+        if not bad:
             return segs, slots
     return None
 
@@ -123,6 +153,9 @@ def verify(D, segs, slots, prayer, mx, bl, teams, per, mins):
         t = s["end"]
     if t != D:
         errs.append(f"timeline is {t} min but event is {D} min")
+    for g in segs:                              # blackout applies to every segment
+        if any(g["start"] < b and g["end"] > a for a, b in bl):
+            errs.append(f"{g['label']} inside a blackout window")
     by_j, by_t = {}, {}
     for s in slots:
         by_j.setdefault(s["judge"], []).append(s)
@@ -222,14 +255,14 @@ def build(F):
         if m:
             opts = m
         else:
-            notes.append(f"Dietary rule {diets} has no matching priced meal option; used general options.")
+            notes.append(f"Dietary rule {diets} has no matching priced meal option; food cannot be planned.")
+            opts = []                       # do NOT fall back to general options
     ordered = G("meals_ordered")
     qty = max(headcount, ordered or 0)
     food = None
     if opts:
-        pref = [o for o in opts if any(w in str(o["name"]).lower() for w in PREFERRED)]
-        order = sorted(pref, key=lambda o: -o["price"]) + \
-            sorted([o for o in opts if o not in pref], key=lambda o: -o["price"])
+        # Design choice: pick the highest-priced option that fits the budget (better meal quality).
+        order = sorted(opts, key=lambda o: -o["price"])
         food = next((o for o in order if fixed + qty * o["price"] <= limit),
                     min(opts, key=lambda o: o["price"]))
         P["food"] = {"option": food["name"], "price": food["price"], "quantity": qty,
@@ -240,7 +273,8 @@ def build(F):
             f"({students} students + {staff} staff + {needed or 0} judges)" if bad else
             f"{qty} meals x Rs {food['price']:,} ({food['name']}) for {headcount} people")
     else:
-        chk("food", False, "no priced meal option in messages")
+        chk("food", False,
+            f"no meal option matches dietary rule {diets}" if diets else "no priced meal option in messages")
 
     # ---- budget
     lines = []
@@ -277,7 +311,7 @@ def build(F):
                     notes.append("A blackout window was ignored because no event start time is in the messages.")
                     continue
                 bl.append((a - s0, b - s0))
-        built = make_schedule(D, prayer, needed, teams, per, mins, late, bl)
+        built = make_schedule(D, prayer, needed, teams, per, mins, late, bl, mx)
         if built:
             segs, slots = built
             ok, detail = verify(D, segs, slots, prayer, mx, bl, teams, per, mins)
@@ -285,9 +319,15 @@ def build(F):
             chk("schedule", ok, detail)
         else:
             chk("schedule", False, "no valid arrangement: not enough time for opening, prayer, lunch, "
-                                   "judging rounds and closing")
+                                   "judging rounds and closing inside the blackout windows")
     else:
         chk("schedule", False, "cannot schedule: judging rules missing")
+
+    # ---- unrecognised rule types must be visible, never silently dropped
+    known = {"requires_feature", "dietary", "blackout"}
+    for r in F["rules"]:
+        if r.get("type") not in known:
+            notes.append(f"Unhandled rule type '{r.get('type')}': {r.get('value', r)}")
 
     gone = [a for a in ("venue", "schedule", "food", "judging", "budget") if not P[a]]
     chk("areas", not gone, "all five areas planned" if not gone else "missing: " + ", ".join(gone))

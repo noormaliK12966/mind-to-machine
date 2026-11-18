@@ -22,7 +22,7 @@ spent [{"item","amount"}] (already ordered or paid from the event budget),
 requests [{"item","amount"}] (asks or quotes that nobody approved),
 rules [{"area":"venue|schedule|food|judging|budget","type":"requires_feature|blackout|dietary|other","value":"one short keyword or text","start":"HH:MM","end":"HH:MM"}] for any other constraint (example: needs a projector -> type requires_feature, value projector).
 Numbers are plain numbers (Rs 1,200 -> 1200). Put each hall's features on that hall.
-If a message has no planning facts: relevant=false, facts={}.
+If a message has no planning facts: relevant=false, facts={}. Omit null, empty, or false keys from facts to save tokens.
 
 MESSAGES:
 """

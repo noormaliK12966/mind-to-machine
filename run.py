@@ -78,12 +78,15 @@ def text_report(state, P):
         L.append(f"#{e['n']} | run {e.get('run', '?')} | model: {e['model']} | area: {e['area']} | "
                  f"tokens in/out/total: {e['in']}/{e['out']}/{e['total']} | {e['secs']}s")
         L += ["INPUT:", e["input"], "OUTPUT:", e["output"], "-" * 74]
-    ti, to = sum(e["in"] for e in state["trace"]), sum(e["out"] for e in state["trace"])
-    L.append(f"TOTAL TOKENS: {ti + to} (in {ti}, out {to}) across {len(state['trace'])} model call(s)")
+    
     for run in sorted({e.get("run") for e in state["trace"]}):
         es = [e for e in state["trace"] if e.get("run") == run]
         L.append(f"   run {run}: {len(es)} call(s), areas {sorted({e['area'] for e in es})}, "
                  f"{sum(e['total'] for e in es)} tokens")
+    
+    ti, to = sum(e["in"] for e in state["trace"]), sum(e["out"] for e in state["trace"])
+    L.append(f"TOTAL TOKENS: {ti + to} (in {ti}, out {to}) across {len(state['trace'])} model call(s)")
+    
     return "\n".join(L)
 
 
@@ -123,18 +126,21 @@ def main():
             facts = d.get("facts") if isinstance(d.get("facts"), dict) else {}
             rec = {"seq": len(state["records"]) + 1, "text": t, "hash": x, "run": run, "date": dt,
                    "dkey": dkey, "facts": facts, "status": "accepted", "reason": "", "affected": []}
+            
             if d.get("relevant") is False or not facts:
                 rec.update(status="ignored", reason="irrelevant: no planning facts in it")
-            elif mode == "UPDATE":
+            else:
                 before, _, _ = plan_of(state["records"])
                 after, _, _ = plan_of(state["records"] + [rec])
                 bad = sorted(failed(after) - failed(before))
-                if bad:
+                if bad and not failed(before):
+                    # The plan was fully valid before; this message breaks it -> reject.
                     rec.update(status="rejected", reason="would break the plan -> " +
                                " | ".join(f"{k}: {after['checks'][k]['detail']}" for k in bad))
-                else:
+                elif mode == "UPDATE":
                     sb, sa = sig(before), sig(after)
                     rec["affected"] = [k for k in SECTIONS if sa[k] != sb[k]]
+                    
             state["records"].append(rec)
 
     P, win, contrib = plan_of(state["records"])
