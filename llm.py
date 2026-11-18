@@ -1,69 +1,80 @@
-"""llm.py - the ONLY place a model is called. Every call is recorded in the trace
-with the token counts exactly as the API reports them."""
-import os, json, time, datetime
-from dotenv import load_dotenv
-from groq import Groq
+"""Groq call + robust JSON extraction for one message at a time."""
+import json
+import os
 
-load_dotenv()
-MODEL = os.getenv("MODEL", "openai/gpt-oss-20b")
-_client = None
+PROMPT = """You extract facts from ONE message about planning a university hackathon.
+Reply with a single JSON object and nothing else. Use ONLY these keys, and omit any key
+the message does not state:
 
-SYSTEM = "You extract planning facts from event messages (English or Roman Urdu) into strict JSON. Output JSON only."
+{
+  "relevant": true/false,            // false if the message has nothing to do with the hackathon,
+                                     // its venue, food, judges, budget or participants
+  "students": int, "team_size": int, "budget": int, "staff": int,
+  "event_hours": number, "prayer_break_min": int,
+  "venues": [{"name": str, "seats": int, "cost": int, "step_free": bool}],
+  "unavailable_venues": [str],
+  "wheelchair_users": int,
+  "catering_rates": [{"item": str, "per_head": int}],
+  "service_charge_pct": number,
+  "judges": int, "honorarium": int, "judge_min_per_team": int, "judge_max_teams": int,
+  "paid": [{"item": str, "amount": int}],
+  "optional_requests": [{"item": str, "cost": int}]
+}
 
-PROMPT = """Year is YEAR when a date has no year. Return one entry per numbered message, same ids:
-{"messages":[{"id":1,"date":"YYYY-MM-DD or null","relevant":true,"facts":{}}]}
-facts holds ONLY what that message states, using these keys:
-students, staff, team_size, teams, hours (event length), budget_total, prayer_break_min, start_clock ("HH:MM"),
-venues [{"name","capacity","cost","features":[short keywords],"available":true/false}],
-meal_options [{"name":"short lowercase label","price":per head}],
-meals_ordered (how many meals a sender says they will supply),
-judges_confirmed, judge_fee, judge_min_per_team, judge_max_teams, judges_per_team, judge_late_min,
-spent [{"item","amount"}] (already ordered or paid from the event budget),
-requests [{"item","amount"}] (asks or quotes that nobody approved),
-rules [{"area":"venue|schedule|food|judging|budget","type":"requires_feature|blackout|dietary|other","value":"one short keyword or text","start":"HH:MM","end":"HH:MM"}] for any other constraint (example: needs a projector -> type requires_feature, value projector).
-Numbers are plain numbers (Rs 1,200 -> 1200). Put each hall's features on that hall.
-If a message has no planning facts: relevant=false, facts={}. Omit null, empty, or false keys from facts to save tokens.
-
-MESSAGES:
+Rules:
+- Numbers are plain integers in Rs (no commas). The message may mix English and Urdu.
+- "Only Halls 2 and 3 have ramp access" means step_free=true for those and false for the others listed.
+- A library, exam or unrelated campus notice is relevant=false and has no other keys.
+- A request or quote that is not approved goes in optional_requests, never in paid.
+- Food or catering prices (biryani box, sandwich box, per head) go ONLY in catering_rates, never in optional_requests.
 """
 
 
-def client():
-    global _client
-    if _client is None:
-        _client = Groq(api_key=os.environ["GROQ_API_KEY"], timeout=45)
-    return _client
-
-
-def call(trace, area, system, user):
-    t = time.time()
-    kw = dict(model=MODEL, temperature=0, response_format={"type": "json_object"},
-              messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
-    if "gpt-oss" in MODEL:                     # reasoning model: keep thinking short to save tokens
-        kw["reasoning_effort"] = "low"
+def _load_env():
     try:
-        r = client().chat.completions.create(**kw)
-    except TypeError:                          # old groq package without reasoning_effort
-        kw.pop("reasoning_effort", None)
-        r = client().chat.completions.create(**kw)
-    u = r.usage
-    trace.append({"n": len(trace) + 1, "model": getattr(r, "model", None) or MODEL, "area": area,
-                  "input": system + "\n\n" + user, "output": r.choices[0].message.content,
-                  "in": u.prompt_tokens, "out": u.completion_tokens, "total": u.total_tokens,
-                  "secs": round(time.time() - t, 2)})
-    return trace[-1]["output"]
+        from dotenv import load_dotenv
+        load_dotenv()
+        return
+    except ImportError:
+        pass
+    if os.path.exists(".env"):
+        for line in open(".env", encoding="utf-8"):
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, v = line.strip().split("=", 1)
+                os.environ.setdefault(k, v)
 
 
-def read(trace, texts):
-    """Area 'reading': turn raw messages into structured facts. One call for the whole batch."""
-    prompt = PROMPT.replace("YEAR", str(datetime.date.today().year))
-    body = "\n".join(f"[{i}] {t}" for i, t in enumerate(texts, 1))
-    for _ in range(2):                       # one retry only if the JSON is unusable
-        out = call(trace, "reading", SYSTEM, prompt + body)
+def _parse_json(text):
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        text = text[text.find("{"):]
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("no JSON object in reply")
+    return json.loads(text[start:end + 1])
+
+
+def extract_facts(message, retries=3):
+    _load_env()
+    from groq import Groq
+    client = Groq(api_key=os.environ["GROQ_API_KEY"])
+    model = os.getenv("MODEL", "openai/gpt-oss-20b")
+
+    last = None
+    for attempt in range(retries):
+        kwargs = dict(
+            model=model,
+            temperature=0,
+            max_tokens=4000,   # reasoning models spend tokens thinking
+            messages=[{"role": "system", "content": PROMPT},
+                      {"role": "user", "content": message}],
+        )
+        if attempt < retries - 1:          # last attempt: no JSON mode, parse by hand
+            kwargs["response_format"] = {"type": "json_object"}
         try:
-            data = json.loads(out)["messages"]
-            if isinstance(data, list) and data:
-                return data
-        except Exception:
-            pass
-    raise RuntimeError("reader returned unusable JSON twice")
+            reply = client.chat.completions.create(**kwargs)
+            return _parse_json(reply.choices[0].message.content)
+        except Exception as e:             # json_validate_failed, bad JSON, rate limit...
+            last = e
+    raise RuntimeError(f"LLM extraction failed after {retries} tries: {last}")

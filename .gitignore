@@ -1,7 +1,5 @@
-.env
 state.json
 out/
 __pycache__/
-inbox/
 *.pyc
-venv/
+.env

@@ -1,4 +1,4 @@
-"""report.py - the interface: turns state + plan into out/report.html (open it in a browser)."""
+"""report.py - the interface: turns state + plan into out/report.html"""
 import html
 import engine
 
@@ -16,7 +16,6 @@ h2{margin:0 0 8px;font-size:17px} table{border-collapse:collapse;width:100%} td,
 pre{white-space:pre-wrap;background:#f0f2f8;padding:8px;border-radius:6px;font-size:12px;max-height:320px;overflow:auto}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}.card{background:#f0f2f8;border-radius:8px;padding:10px}
 small{color:#555}</style>"""
-
 
 def render(state, P):
     E = html.escape
