@@ -22,6 +22,16 @@ def num(x):
     return int(v) if v.is_integer() else v
 
 
+STOP = {"bill", "bills", "cost", "costs", "fee", "fees", "payment", "payments", "total", "charge", "charges",
+        "expense", "expenses", "the", "for", "of", "and", "a", "an", "rs", "new", "updated"}
+
+
+def toks(s):
+    """Content words of an item name, so 'printing bill' and 'printing' count as the same item."""
+    return {w[:-1] if len(w) > 3 and w.endswith("s") else w
+            for w in re.findall(r"[a-z0-9]+", str(s).lower()) if w not in STOP}
+
+
 def hm(s):
     m = re.match(r"\s*(\d{1,2}):(\d{2})", str(s or ""))
     return int(m[1]) * 60 + int(m[2]) if m else None
@@ -60,6 +70,11 @@ def fold(records):
                 if not isinstance(it, dict) or not it.get(idk):
                     continue
                 name = str(it[idk]).strip().lower()
+                if k in ("spent", "requests"):          # same expense under a slightly different name
+                    for old in F[k]:
+                        if toks(name) & toks(old):
+                            name = old
+                            break
                 clean = {a: (num(b) if a in MONEY else b) for a, b in it.items() if b not in (None, "", [])}
                 clean = {a: b for a, b in clean.items() if b is not None}
                 F[k][name] = {**F[k].get(name, {}), **clean}
